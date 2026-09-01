@@ -1,0 +1,10 @@
+[package]
+name = "exiftime"
+version = "0.1.0"
+edition = "2021"
+description = "Reads the EXIF capture timestamp out of a JPEG and validates it."
+license = "MIT"
+
+[[bin]]
+name = "exiftime"
+path = "src/main.rs"
