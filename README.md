@@ -45,5 +45,6 @@ time than it saves.
 ## Status
 
 Early. See the test suite in `src/date.rs` for the set of malformed-date
-cases it's already expected to handle correctly, and `src/jpeg.rs` for the
-segment-scanning edge cases.
+cases it's already expected to handle correctly, `src/jpeg.rs` for the
+segment-scanning edge cases, and `src/tiff.rs` for malformed TIFF/IFD cases
+(bad byte order markers, out-of-range offsets, truncated entry tables).

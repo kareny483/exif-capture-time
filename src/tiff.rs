@@ -129,3 +129,181 @@ pub fn find_capture_time_raw(data: &[u8]) -> Result<String, ExifError> {
 
     ascii_value(&ifd0, TAG_DATE_TIME).ok_or(ExifError::NoDateTag)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(tag: u16, field_type: u16, count: u32, value: u32) -> [u8; 12] {
+        let mut e = [0u8; 12];
+        e[0..2].copy_from_slice(&tag.to_le_bytes());
+        e[2..4].copy_from_slice(&field_type.to_le_bytes());
+        e[4..8].copy_from_slice(&count.to_le_bytes());
+        e[8..12].copy_from_slice(&value.to_le_bytes());
+        e
+    }
+
+    fn ifd(entries: &[[u8; 12]]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for e in entries {
+            buf.extend_from_slice(e);
+        }
+        buf
+    }
+
+    fn header(ifd0_offset: u32) -> Vec<u8> {
+        let mut buf = vec![b'I', b'I'];
+        buf.extend_from_slice(&42u16.to_le_bytes());
+        buf.extend_from_slice(&ifd0_offset.to_le_bytes());
+        buf
+    }
+
+    fn ascii_field(s: &str) -> Vec<u8> {
+        let mut bytes = s.as_bytes().to_vec();
+        bytes.push(0);
+        bytes
+    }
+
+    #[test]
+    fn header_too_short() {
+        let data = vec![b'I', b'I', 42, 0, 0, 0];
+        assert!(matches!(
+            find_capture_time_raw(&data),
+            Err(ExifError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn unrecognized_byte_order_marker() {
+        let mut data = vec![b'X', b'X'];
+        data.extend_from_slice(&42u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        assert!(matches!(
+            find_capture_time_raw(&data),
+            Err(ExifError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn bad_magic_number() {
+        let mut data = vec![b'I', b'I'];
+        data.extend_from_slice(&43u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        assert!(matches!(
+            find_capture_time_raw(&data),
+            Err(ExifError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn ifd0_offset_past_end_of_data() {
+        let data = header(1000);
+        assert!(matches!(
+            find_capture_time_raw(&data),
+            Err(ExifError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn ifd0_entry_table_truncated() {
+        let mut data = header(8);
+        // Claims two entries but only supplies bytes for one.
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&entry(TAG_DATE_TIME, TYPE_ASCII, 20, 0));
+        assert!(matches!(
+            find_capture_time_raw(&data),
+            Err(ExifError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn ifd0_date_time_success() {
+        let mut data = header(8);
+        let string_offset = 8 + 2 + 12; // header + count + one entry
+        data.extend_from_slice(&ifd(&[entry(
+            TAG_DATE_TIME,
+            TYPE_ASCII,
+            20,
+            string_offset as u32,
+        )]));
+        data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
+        assert_eq!(
+            find_capture_time_raw(&data).unwrap(),
+            "2023:07:04 14:22:09"
+        );
+    }
+
+    #[test]
+    fn exif_sub_ifd_date_time_original_wins_over_ifd0_date_time() {
+        let mut data = header(8);
+        let decoy_offset = 8 + 2 + 24; // header + count + two entries
+        let decoy = ascii_field("2000:01:01 00:00:00");
+        let sub_ifd_offset = decoy_offset + decoy.len();
+        let real_offset = sub_ifd_offset + 2 + 12; // sub ifd header + count + one entry
+
+        data.extend_from_slice(&ifd(&[
+            entry(TAG_EXIF_IFD_POINTER, 4, 1, sub_ifd_offset as u32),
+            entry(TAG_DATE_TIME, TYPE_ASCII, 20, decoy_offset as u32),
+        ]));
+        data.extend_from_slice(&decoy);
+        data.extend_from_slice(&ifd(&[entry(
+            TAG_DATE_TIME_ORIGINAL,
+            TYPE_ASCII,
+            20,
+            real_offset as u32,
+        )]));
+        data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
+
+        assert_eq!(
+            find_capture_time_raw(&data).unwrap(),
+            "2023:07:04 14:22:09"
+        );
+    }
+
+    #[test]
+    fn invalid_exif_ifd_pointer_falls_back_to_ifd0_date_time() {
+        let mut data = header(8);
+        let string_offset = 8 + 2 + 24; // header + count + two entries
+        data.extend_from_slice(&ifd(&[
+            entry(TAG_EXIF_IFD_POINTER, 4, 1, 999_999),
+            entry(TAG_DATE_TIME, TYPE_ASCII, 20, string_offset as u32),
+        ]));
+        data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
+
+        assert_eq!(
+            find_capture_time_raw(&data).unwrap(),
+            "2023:07:04 14:22:09"
+        );
+    }
+
+    #[test]
+    fn ascii_value_offset_past_end_of_data_yields_no_date_tag() {
+        let mut data = header(8);
+        data.extend_from_slice(&ifd(&[entry(TAG_DATE_TIME, TYPE_ASCII, 20, 999_999)]));
+        assert!(matches!(
+            find_capture_time_raw(&data),
+            Err(ExifError::NoDateTag)
+        ));
+    }
+
+    #[test]
+    fn big_endian_byte_order() {
+        let mut data = vec![b'M', b'M'];
+        data.extend_from_slice(&42u16.to_be_bytes());
+        data.extend_from_slice(&8u32.to_be_bytes());
+
+        let string_offset = 8 + 2 + 12u32;
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&TAG_DATE_TIME.to_be_bytes());
+        data.extend_from_slice(&TYPE_ASCII.to_be_bytes());
+        data.extend_from_slice(&20u32.to_be_bytes());
+        data.extend_from_slice(&string_offset.to_be_bytes());
+        data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
+
+        assert_eq!(
+            find_capture_time_raw(&data).unwrap(),
+            "2023:07:04 14:22:09"
+        );
+    }
+}
