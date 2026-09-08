@@ -11,6 +11,28 @@ pub struct CaptureTime {
     pub hour: u8,
     pub minute: u8,
     pub second: u8,
+    pub subsec: Option<String>,
+    pub offset: Option<Offset>,
+}
+
+/// A UTC offset from OffsetTime/OffsetTimeOriginal, e.g. `-07:00`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Offset {
+    pub negative: bool,
+    pub hours: u8,
+    pub minutes: u8,
+}
+
+impl fmt::Display for Offset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{:02}:{:02}",
+            if self.negative { "-" } else { "+" },
+            self.hours,
+            self.minutes
+        )
+    }
 }
 
 impl fmt::Display for CaptureTime {
@@ -19,15 +41,26 @@ impl fmt::Display for CaptureTime {
             f,
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             self.year, self.month, self.day, self.hour, self.minute, self.second
-        )
+        )?;
+        if let Some(subsec) = &self.subsec {
+            write!(f, ".{}", subsec)?;
+        }
+        if let Some(offset) = &self.offset {
+            write!(f, "{}", offset)?;
+        }
+        Ok(())
     }
 }
 
 /// Parses the raw `YYYY:MM:DD HH:MM:SS` string EXIF stores DateTimeOriginal
-/// and DateTime as. Rejects the all-zero date some cameras write when they
-/// have no clock set, and any field outside its calendar range, rather than
-/// silently passing bad data through.
-pub fn parse(raw: &str) -> Result<CaptureTime, String> {
+/// and DateTime as, plus the optional SubSecTime(Original) and
+/// OffsetTime(Original) strings that accompany it. Rejects the all-zero date
+/// some cameras write when they have no clock set, and any date/time field
+/// outside its calendar range, rather than silently passing bad data
+/// through. A malformed subsecond or offset value is dropped rather than
+/// failing the whole parse: they're supplementary precision, not required
+/// to answer "when was this taken".
+pub fn parse(raw: &str, subsec: Option<&str>, offset: Option<&str>) -> Result<CaptureTime, String> {
     let bytes = raw.as_bytes();
     if bytes.len() != 19 {
         return Err(format!("expected 19 characters, got {}", bytes.len()));
@@ -70,6 +103,56 @@ pub fn parse(raw: &str) -> Result<CaptureTime, String> {
         hour: hour as u8,
         minute: minute as u8,
         second: second as u8,
+        subsec: subsec.and_then(valid_subsec),
+        offset: offset.and_then(|s| parse_offset(s).ok()),
+    })
+}
+
+/// EXIF's subsecond tags are a decimal fraction stored as digit characters
+/// (e.g. "500" means .500), not a fixed-width field, so any nonempty numeric
+/// string is accepted as-is.
+fn valid_subsec(raw: &str) -> Option<String> {
+    if !raw.is_empty() && raw.bytes().all(|b| b.is_ascii_digit()) {
+        Some(raw.to_string())
+    } else {
+        None
+    }
+}
+
+/// Parses an OffsetTime/OffsetTimeOriginal value: `+HH:MM`, `-HH:MM`, or the
+/// nonstandard but occasionally seen `Z` for UTC.
+fn parse_offset(raw: &str) -> Result<Offset, String> {
+    if raw.eq_ignore_ascii_case("z") {
+        return Ok(Offset {
+            negative: false,
+            hours: 0,
+            minutes: 0,
+        });
+    }
+
+    let bytes = raw.as_bytes();
+    if bytes.len() != 6 || bytes[3] != b':' {
+        return Err(format!("'{}' does not match +HH:MM layout", raw));
+    }
+    let negative = match bytes[0] {
+        b'+' => false,
+        b'-' => true,
+        _ => return Err(format!("'{}' has no leading sign", raw)),
+    };
+
+    let hours = parse_field(&raw[1..3])?;
+    let minutes = parse_field(&raw[4..6])?;
+    if hours > 14 {
+        return Err(format!("offset hours {} out of range", hours));
+    }
+    if minutes > 59 {
+        return Err(format!("offset minutes {} out of range", minutes));
+    }
+
+    Ok(Offset {
+        negative,
+        hours: hours as u8,
+        minutes: minutes as u8,
     })
 }
 
@@ -100,6 +183,8 @@ mod tests {
                     hour: 14,
                     minute: 22,
                     second: 9,
+                    subsec: None,
+                    offset: None,
                 }),
             },
             Case {
@@ -117,6 +202,8 @@ mod tests {
                     hour: 23,
                     minute: 59,
                     second: 60,
+                    subsec: None,
+                    offset: None,
                 }),
             },
             Case {
@@ -174,12 +261,14 @@ mod tests {
                     hour: 0,
                     minute: 0,
                     second: 0,
+                    subsec: None,
+                    offset: None,
                 }),
             },
         ];
 
         for case in cases {
-            let got = parse(case.input);
+            let got = parse(case.input, None, None);
             match (&case.want_ok, &got) {
                 (Some(want), Ok(got)) => {
                     assert_eq!(want, got, "case '{}'", case.name)
@@ -191,5 +280,54 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn subsec_is_included_when_present_and_numeric() {
+        let got = parse("2023:07:04 14:22:09", Some("500"), None).unwrap();
+        assert_eq!(got.subsec.as_deref(), Some("500"));
+        assert_eq!(got.to_string(), "2023-07-04 14:22:09.500");
+    }
+
+    #[test]
+    fn non_numeric_subsec_is_dropped_rather_than_failing_the_parse() {
+        let got = parse("2023:07:04 14:22:09", Some("abc"), None).unwrap();
+        assert_eq!(got.subsec, None);
+    }
+
+    #[test]
+    fn positive_offset_is_included() {
+        let got = parse("2023:07:04 14:22:09", None, Some("+05:30")).unwrap();
+        assert_eq!(got.to_string(), "2023-07-04 14:22:09+05:30");
+    }
+
+    #[test]
+    fn negative_offset_is_included() {
+        let got = parse("2023:07:04 14:22:09", None, Some("-07:00")).unwrap();
+        assert_eq!(got.to_string(), "2023-07-04 14:22:09-07:00");
+    }
+
+    #[test]
+    fn subsec_and_offset_combine_in_display() {
+        let got = parse("2023:07:04 14:22:09", Some("12"), Some("+00:00")).unwrap();
+        assert_eq!(got.to_string(), "2023-07-04 14:22:09.12+00:00");
+    }
+
+    #[test]
+    fn z_offset_means_utc() {
+        let got = parse("2023:07:04 14:22:09", None, Some("Z")).unwrap();
+        assert_eq!(got.to_string(), "2023-07-04 14:22:09+00:00");
+    }
+
+    #[test]
+    fn malformed_offset_is_dropped_rather_than_failing_the_parse() {
+        let got = parse("2023:07:04 14:22:09", None, Some("not-an-offset")).unwrap();
+        assert_eq!(got.offset, None);
+    }
+
+    #[test]
+    fn offset_hours_out_of_range_is_dropped() {
+        let got = parse("2023:07:04 14:22:09", None, Some("+15:00")).unwrap();
+        assert_eq!(got.offset, None);
     }
 }

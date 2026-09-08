@@ -38,7 +38,7 @@ fn run(path: &str) -> Result<date::CaptureTime, ExifError> {
     let data = fs::read(path)?;
     let exif = jpeg::find_exif_segment(&data)?;
     let raw = tiff::find_capture_time_raw(exif)?;
-    date::parse(&raw).map_err(ExifError::Malformed)
+    date::parse(&raw.date, raw.subsec.as_deref(), raw.offset.as_deref()).map_err(ExifError::Malformed)
 }
 
 fn main() {

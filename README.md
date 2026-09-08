@@ -20,6 +20,16 @@ Output on success is the capture time in `YYYY-MM-DD HH:MM:SS` form:
 
     2023-07-04 14:22:09
 
+When the file also carries SubSecTimeOriginal and/or OffsetTimeOriginal (or
+their non-"Original" counterparts, if that's what the date came from), the
+fractional seconds and UTC offset are appended:
+
+    2023-07-04 14:22:09.500-07:00
+
+A malformed subsecond or offset value is dropped rather than treated as a
+failure: DateTimeOriginal is what answers the question, the other two just
+sharpen it.
+
 On failure it prints the reason to stderr and exits non-zero:
 
     photo.jpg: EXIF data has no DateTimeOriginal or DateTime tag
@@ -30,11 +40,12 @@ On failure it prints the reason to stderr and exits non-zero:
    `Exif\0\0` header (`src/jpeg.rs`).
 2. Parse the TIFF structure inside that segment: byte order, IFD0, and the
    Exif sub-IFD, to find tag `0x9003` (DateTimeOriginal), falling back to
-   `0x0132` (DateTime) on IFD0 if the more specific tag is absent
-   (`src/tiff.rs`).
+   `0x0132` (DateTime) on IFD0 if the more specific tag is absent. Also reads
+   whichever of SubSecTime(Original) and OffsetTime(Original) match the date
+   tag that was actually used (`src/tiff.rs`).
 3. Parse and validate the raw `YYYY:MM:DD HH:MM:SS` string, rejecting the
-   all-zero "unknown date" placeholder and out-of-range fields
-   (`src/date.rs`).
+   all-zero "unknown date" placeholder and out-of-range fields, and parse
+   the subsecond/offset strings if present (`src/date.rs`).
 
 ## Scope
 

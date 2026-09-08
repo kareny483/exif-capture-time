@@ -3,7 +3,20 @@ use crate::ExifError;
 const TAG_EXIF_IFD_POINTER: u16 = 0x8769;
 const TAG_DATE_TIME_ORIGINAL: u16 = 0x9003;
 const TAG_DATE_TIME: u16 = 0x0132;
+const TAG_OFFSET_TIME: u16 = 0x9010;
+const TAG_OFFSET_TIME_ORIGINAL: u16 = 0x9011;
+const TAG_SUBSEC_TIME: u16 = 0x9290;
+const TAG_SUBSEC_TIME_ORIGINAL: u16 = 0x9291;
 const TYPE_ASCII: u16 = 2;
+
+/// The raw strings backing a capture time, before `date::parse` validates
+/// them. Subsecond and offset tags live in the Exif sub-IFD regardless of
+/// whether the date itself came from DateTimeOriginal or IFD0's DateTime.
+pub struct RawCaptureTime {
+    pub date: String,
+    pub subsec: Option<String>,
+    pub offset: Option<String>,
+}
 
 #[derive(Clone, Copy)]
 enum ByteOrder {
@@ -91,9 +104,9 @@ fn ascii_value(ifd: &Ifd, tag: u16) -> Option<String> {
     }
 }
 
-/// Walks IFD0 and the Exif sub-IFD to find the raw capture-time string.
-/// Returns it unparsed; `date::parse` is responsible for validating it.
-pub fn find_capture_time_raw(data: &[u8]) -> Result<String, ExifError> {
+/// Walks IFD0 and the Exif sub-IFD to find the raw capture-time strings.
+/// Returns them unparsed; `date::parse` is responsible for validating them.
+pub fn find_capture_time_raw(data: &[u8]) -> Result<RawCaptureTime, ExifError> {
     if data.len() < 8 {
         return Err(ExifError::Malformed("tiff header too short".into()));
     }
@@ -118,16 +131,31 @@ pub fn find_capture_time_raw(data: &[u8]) -> Result<String, ExifError> {
         .iter()
         .find(|e| e.0 == TAG_EXIF_IFD_POINTER)
         .map(|e| order.u32(&e.3) as usize);
+    let exif_ifd = exif_ifd_offset.and_then(|off| read_ifd(data, order, off).ok());
 
-    if let Some(sub_offset) = exif_ifd_offset {
-        if let Ok(exif_ifd) = read_ifd(data, order, sub_offset) {
-            if let Some(dt) = ascii_value(&exif_ifd, TAG_DATE_TIME_ORIGINAL) {
-                return Ok(dt);
-            }
+    if let Some(exif_ifd) = &exif_ifd {
+        if let Some(date) = ascii_value(exif_ifd, TAG_DATE_TIME_ORIGINAL) {
+            return Ok(RawCaptureTime {
+                date,
+                subsec: ascii_value(exif_ifd, TAG_SUBSEC_TIME_ORIGINAL),
+                offset: ascii_value(exif_ifd, TAG_OFFSET_TIME_ORIGINAL),
+            });
         }
     }
 
-    ascii_value(&ifd0, TAG_DATE_TIME).ok_or(ExifError::NoDateTag)
+    let date = ascii_value(&ifd0, TAG_DATE_TIME).ok_or(ExifError::NoDateTag)?;
+    let (subsec, offset) = match &exif_ifd {
+        Some(exif_ifd) => (
+            ascii_value(exif_ifd, TAG_SUBSEC_TIME),
+            ascii_value(exif_ifd, TAG_OFFSET_TIME),
+        ),
+        None => (None, None),
+    };
+    Ok(RawCaptureTime {
+        date,
+        subsec,
+        offset,
+    })
 }
 
 #[cfg(test)]
@@ -228,10 +256,10 @@ mod tests {
             string_offset as u32,
         )]));
         data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
-        assert_eq!(
-            find_capture_time_raw(&data).unwrap(),
-            "2023:07:04 14:22:09"
-        );
+        let got = find_capture_time_raw(&data).unwrap();
+        assert_eq!(got.date, "2023:07:04 14:22:09");
+        assert_eq!(got.subsec, None);
+        assert_eq!(got.offset, None);
     }
 
     #[test]
@@ -255,10 +283,7 @@ mod tests {
         )]));
         data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
 
-        assert_eq!(
-            find_capture_time_raw(&data).unwrap(),
-            "2023:07:04 14:22:09"
-        );
+        assert_eq!(find_capture_time_raw(&data).unwrap().date, "2023:07:04 14:22:09");
     }
 
     #[test]
@@ -271,10 +296,77 @@ mod tests {
         ]));
         data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
 
-        assert_eq!(
-            find_capture_time_raw(&data).unwrap(),
-            "2023:07:04 14:22:09"
-        );
+        assert_eq!(find_capture_time_raw(&data).unwrap().date, "2023:07:04 14:22:09");
+    }
+
+    #[test]
+    fn subsec_and_offset_time_original_are_read_alongside_date_time_original() {
+        let mut data = header(8);
+        let exif_ifd_offset = 8 + 2 + 12; // header + count + one entry
+
+        data.extend_from_slice(&ifd(&[entry(
+            TAG_EXIF_IFD_POINTER,
+            4,
+            1,
+            exif_ifd_offset as u32,
+        )]));
+
+        let entries_start = exif_ifd_offset + 2;
+        let date_offset = entries_start + 3 * 12;
+        let subsec_offset = date_offset + 20;
+        let offset_string_offset = subsec_offset + 4;
+
+        data.extend_from_slice(&ifd(&[
+            entry(TAG_DATE_TIME_ORIGINAL, TYPE_ASCII, 20, date_offset as u32),
+            entry(TAG_SUBSEC_TIME_ORIGINAL, TYPE_ASCII, 4, subsec_offset as u32),
+            entry(
+                TAG_OFFSET_TIME_ORIGINAL,
+                TYPE_ASCII,
+                7,
+                offset_string_offset as u32,
+            ),
+        ]));
+        data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
+        data.extend_from_slice(&ascii_field("500"));
+        data.extend_from_slice(&ascii_field("-07:00"));
+
+        let got = find_capture_time_raw(&data).unwrap();
+        assert_eq!(got.date, "2023:07:04 14:22:09");
+        assert_eq!(got.subsec.as_deref(), Some("500"));
+        assert_eq!(got.offset.as_deref(), Some("-07:00"));
+    }
+
+    #[test]
+    fn subsec_and_offset_time_fall_back_when_date_time_is_plain() {
+        let mut data = header(8);
+        let exif_ifd_offset = 8 + 2 + 24; // header + count + two entries
+        let plain_date_offset = exif_ifd_offset + 2 + 24; // sub ifd header + count + two entries
+
+        data.extend_from_slice(&ifd(&[
+            entry(TAG_EXIF_IFD_POINTER, 4, 1, exif_ifd_offset as u32),
+            entry(TAG_DATE_TIME, TYPE_ASCII, 20, plain_date_offset as u32),
+        ]));
+
+        let subsec_offset = plain_date_offset + 20;
+        let offset_string_offset = subsec_offset + 4;
+
+        data.extend_from_slice(&ifd(&[
+            entry(TAG_SUBSEC_TIME, TYPE_ASCII, 4, subsec_offset as u32),
+            entry(
+                TAG_OFFSET_TIME,
+                TYPE_ASCII,
+                7,
+                offset_string_offset as u32,
+            ),
+        ]));
+        data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
+        data.extend_from_slice(&ascii_field("500"));
+        data.extend_from_slice(&ascii_field("-07:00"));
+
+        let got = find_capture_time_raw(&data).unwrap();
+        assert_eq!(got.date, "2023:07:04 14:22:09");
+        assert_eq!(got.subsec.as_deref(), Some("500"));
+        assert_eq!(got.offset.as_deref(), Some("-07:00"));
     }
 
     #[test]
@@ -301,9 +393,6 @@ mod tests {
         data.extend_from_slice(&string_offset.to_be_bytes());
         data.extend_from_slice(&ascii_field("2023:07:04 14:22:09"));
 
-        assert_eq!(
-            find_capture_time_raw(&data).unwrap(),
-            "2023:07:04 14:22:09"
-        );
+        assert_eq!(find_capture_time_raw(&data).unwrap().date, "2023:07:04 14:22:09");
     }
 }
