@@ -11,13 +11,24 @@ pub fn find_exif_segment(data: &[u8]) -> Result<&[u8], ExifError> {
     }
 
     let mut pos = 2;
-    while pos + 1 < data.len() {
+    while pos < data.len() {
         if data[pos] != 0xFF {
             pos += 1;
             continue;
         }
-        let marker = data[pos + 1];
-        pos += 2;
+
+        // A marker is 0xFF followed by a non-zero, non-0xFF code byte, but
+        // encoders are allowed to pad with extra 0xFF fill bytes before the
+        // real code. Skip over any number of them to find it.
+        let mut code_pos = pos + 1;
+        while code_pos < data.len() && data[code_pos] == 0xFF {
+            code_pos += 1;
+        }
+        if code_pos >= data.len() {
+            break;
+        }
+        let marker = data[code_pos];
+        pos = code_pos + 1;
 
         // Markers with no payload: standalone codes and restart markers.
         if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
@@ -84,6 +95,25 @@ mod tests {
 
         let overrun = vec![0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF];
 
+        let padded_exif = {
+            // Extra 0xFF fill bytes before the APP1 marker code, which some
+            // encoders emit and which are not part of the marker itself.
+            let mut d = vec![0xFF, 0xD8, 0xFF, 0xFF, 0xFF];
+            d.extend_from_slice(&app1(b"Exif\0\0MM\x00*\x00\x00\x00\x08"));
+            d.extend_from_slice(&[0xFF, 0xD9]);
+            d
+        };
+
+        let padded_soi = {
+            // Fill bytes are also legal directly after the SOI marker.
+            let mut d = vec![0xFF, 0xD8, 0xFF, 0xFF];
+            d.extend_from_slice(&app1(b"Exif\0\0MM\x00*\x00\x00\x00\x08"));
+            d.extend_from_slice(&[0xFF, 0xD9]);
+            d
+        };
+
+        let trailing_fill_only = vec![0xFF, 0xD8, 0xFF, 0xFF, 0xFF];
+
         let cases: Vec<(&str, Vec<u8>, fn(&Result<&[u8], ExifError>) -> bool)> = vec![
             (
                 "missing SOI",
@@ -105,6 +135,21 @@ mod tests {
                 "segment length overruns buffer",
                 overrun,
                 |r| matches!(r, Err(ExifError::Malformed(_))),
+            ),
+            (
+                "fill bytes before app1 marker code are skipped",
+                padded_exif,
+                |r| matches!(r, Ok(payload) if payload.starts_with(b"MM")),
+            ),
+            (
+                "fill bytes right after soi are skipped",
+                padded_soi,
+                |r| matches!(r, Ok(payload) if payload.starts_with(b"MM")),
+            ),
+            (
+                "file ends in fill bytes with no marker code",
+                trailing_fill_only,
+                |r| matches!(r, Err(ExifError::NoExif)),
             ),
         ];
 
