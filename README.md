@@ -1,6 +1,6 @@
 # exiftime
 
-Answers one question: what timestamp does a JPEG's EXIF data say the photo
+Answers one question: what timestamp does a file's EXIF data say the photo
 was taken at?
 
 Every photo library eventually runs into files whose "date taken" is wrong,
@@ -15,6 +15,13 @@ cameras write for "unknown", an out-of-range field, and so on).
 ## Usage
 
     cargo run --release -- path/to/photo.jpg
+
+Also works directly on bare TIFF-structured files (`.tif`, and TIFF-based
+RAW formats such as `.cr2`, `.nef`, `.orf`, `.dng`), since their EXIF data
+uses the same layout as the block embedded in a JPEG, just without the JPEG
+wrapper around it:
+
+    cargo run --release -- path/to/photo.cr2
 
 Output on success is the capture time in `YYYY-MM-DD HH:MM:SS` form:
 
@@ -36,22 +43,26 @@ On failure it prints the reason to stderr and exits non-zero:
 
 ## How it works
 
-1. Scan the JPEG's marker segments for the APP1 segment carrying an
-   `Exif\0\0` header (`src/jpeg.rs`).
-2. Parse the TIFF structure inside that segment: byte order, IFD0, and the
-   Exif sub-IFD, to find tag `0x9003` (DateTimeOriginal), falling back to
-   `0x0132` (DateTime) on IFD0 if the more specific tag is absent. Also reads
-   whichever of SubSecTime(Original) and OffsetTime(Original) match the date
-   tag that was actually used (`src/tiff.rs`).
+1. Look at the first bytes of the file to find the TIFF-structured EXIF
+   data, however it's wrapped. A JPEG (`0xFFD8` SOI marker) carries it
+   inside an APP1 segment, found by scanning marker segments for the
+   `Exif\0\0` header (`src/jpeg.rs`). A file that starts with `II` or `MM`
+   is treated as already being that structure, unwrapped (`src/main.rs`).
+2. Parse the TIFF structure: byte order, IFD0, and the Exif sub-IFD, to find
+   tag `0x9003` (DateTimeOriginal), falling back to `0x0132` (DateTime) on
+   IFD0 if the more specific tag is absent. Also reads whichever of
+   SubSecTime(Original) and OffsetTime(Original) match the date tag that
+   was actually used (`src/tiff.rs`).
 3. Parse and validate the raw `YYYY:MM:DD HH:MM:SS` string, rejecting the
    all-zero "unknown date" placeholder and out-of-range fields, and parse
    the subsecond/offset strings if present (`src/date.rs`).
 
 ## Scope
 
-JPEG only, for now. No dependencies: the parsing involved is small enough
-that pulling in an image or EXIF crate would cost more in trust and compile
-time than it saves.
+JPEG and TIFF-structured files (bare `.tif` and TIFF-based RAW formats).
+No dependencies: the parsing involved is small enough that pulling in an
+image or EXIF crate would cost more in trust and compile time than it
+saves.
 
 ## Status
 

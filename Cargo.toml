@@ -2,7 +2,7 @@
 name = "exiftime"
 version = "0.1.0"
 edition = "2021"
-description = "Reads the EXIF capture timestamp out of a JPEG and validates it."
+description = "Reads the EXIF capture timestamp out of a JPEG or TIFF/RAW file and validates it."
 license = "MIT"
 
 [[bin]]

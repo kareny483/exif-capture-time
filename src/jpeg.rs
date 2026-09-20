@@ -7,7 +7,7 @@ use crate::ExifError;
 /// metadata segments follow the image data.
 pub fn find_exif_segment(data: &[u8]) -> Result<&[u8], ExifError> {
     if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
-        return Err(ExifError::NotJpeg);
+        return Err(ExifError::UnsupportedFormat);
     }
 
     let mut pos = 2;
@@ -118,10 +118,10 @@ mod tests {
             (
                 "missing SOI",
                 vec![0x00, 0x01, 0x02, 0x03],
-                |r| matches!(r, Err(ExifError::NotJpeg)),
+                |r| matches!(r, Err(ExifError::UnsupportedFormat)),
             ),
             ("empty file", vec![], |r| {
-                matches!(r, Err(ExifError::NotJpeg))
+                matches!(r, Err(ExifError::UnsupportedFormat))
             }),
             ("valid exif segment", valid_jpeg, |r| {
                 matches!(r, Ok(payload) if payload.starts_with(b"MM"))
