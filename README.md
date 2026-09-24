@@ -41,6 +41,16 @@ On failure it prints the reason to stderr and exits non-zero:
 
     photo.jpg: EXIF data has no DateTimeOriginal or DateTime tag
 
+Pass `--json` for machine-readable output on stdout instead (still exits
+non-zero on failure, and the reason moves into the JSON body instead of
+stderr):
+
+    cargo run --release -- --json path/to/photo.jpg
+    {"path":"path/to/photo.jpg","ok":true,"result":{"timestamp":"2023-07-04 14:22:09.500-07:00","year":2023,"month":7,"day":4,"hour":14,"minute":22,"second":9,"subsec":"500","offset":"-07:00"}}
+
+    cargo run --release -- --json broken.jpg
+    {"path":"broken.jpg","ok":false,"error":"no EXIF (APP1) segment found"}
+
 ## How it works
 
 1. Look at the first bytes of the file to find the TIFF-structured EXIF

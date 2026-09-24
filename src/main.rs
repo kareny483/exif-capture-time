@@ -58,22 +58,97 @@ fn run(path: &str) -> Result<date::CaptureTime, ExifError> {
     date::parse(&raw.date, raw.subsec.as_deref(), raw.offset.as_deref()).map_err(ExifError::Malformed)
 }
 
+/// Minimal escaping for the handful of characters that can actually show up
+/// in our output: a file path (in error JSON) or the parts of a CaptureTime.
+/// Not a general-purpose JSON string encoder.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn capture_time_to_json(t: &date::CaptureTime) -> String {
+    let mut fields = format!(
+        "\"timestamp\":\"{}\",\"year\":{},\"month\":{},\"day\":{},\"hour\":{},\"minute\":{},\"second\":{}",
+        json_escape(&t.to_string()),
+        t.year,
+        t.month,
+        t.day,
+        t.hour,
+        t.minute,
+        t.second
+    );
+    fields.push_str(",\"subsec\":");
+    match &t.subsec {
+        Some(s) => fields.push_str(&format!("\"{}\"", json_escape(s))),
+        None => fields.push_str("null"),
+    }
+    fields.push_str(",\"offset\":");
+    match &t.offset {
+        Some(o) => fields.push_str(&format!("\"{}\"", json_escape(&o.to_string()))),
+        None => fields.push_str("null"),
+    }
+    format!("{{{}}}", fields)
+}
+
+fn print_result(path: &str, result: &Result<date::CaptureTime, ExifError>, json: bool) {
+    if json {
+        let body = match result {
+            Ok(t) => format!("\"ok\":true,\"result\":{}", capture_time_to_json(t)),
+            Err(e) => format!(
+                "\"ok\":false,\"error\":\"{}\"",
+                json_escape(&e.to_string())
+            ),
+        };
+        println!(
+            "{{\"path\":\"{}\",{}}}",
+            json_escape(path),
+            body
+        );
+    } else {
+        match result {
+            Ok(t) => println!("{}", t),
+            Err(e) => eprintln!("{}: {}", path, e),
+        }
+    }
+}
+
 fn main() {
-    let mut args = env::args().skip(1);
-    let path = match args.next() {
+    let mut json = false;
+    let mut path = None;
+    for arg in env::args().skip(1) {
+        if arg == "--json" {
+            json = true;
+        } else if path.is_none() {
+            path = Some(arg);
+        } else {
+            eprintln!("usage: exiftime [--json] <path-to-jpeg-or-tiff>");
+            process::exit(2);
+        }
+    }
+    let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: exiftime <path-to-jpeg-or-tiff>");
+            eprintln!("usage: exiftime [--json] <path-to-jpeg-or-tiff>");
             process::exit(2);
         }
     };
 
-    match run(&path) {
-        Ok(capture_time) => println!("{}", capture_time),
-        Err(e) => {
-            eprintln!("{}: {}", path, e);
-            process::exit(1);
-        }
+    let result = run(&path);
+    let failed = result.is_err();
+    print_result(&path, &result, json);
+    if failed {
+        process::exit(1);
     }
 }
 
@@ -106,5 +181,30 @@ mod tests {
             extract_exif_bytes(&too_short),
             Err(ExifError::UnsupportedFormat)
         ));
+    }
+
+    #[test]
+    fn json_escape_handles_quotes_backslashes_and_control_chars() {
+        assert_eq!(json_escape("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+        assert_eq!(json_escape("\u{7}"), "\\u0007");
+        assert_eq!(json_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn capture_time_to_json_includes_null_subsec_and_offset_when_absent() {
+        let t = date::parse("2023:07:04 14:22:09", None, None).unwrap();
+        assert_eq!(
+            capture_time_to_json(&t),
+            "{\"timestamp\":\"2023-07-04 14:22:09\",\"year\":2023,\"month\":7,\"day\":4,\
+             \"hour\":14,\"minute\":22,\"second\":9,\"subsec\":null,\"offset\":null}"
+        );
+    }
+
+    #[test]
+    fn capture_time_to_json_includes_subsec_and_offset_when_present() {
+        let t = date::parse("2023:07:04 14:22:09", Some("500"), Some("-07:00")).unwrap();
+        let json = capture_time_to_json(&t);
+        assert!(json.contains("\"subsec\":\"500\""));
+        assert!(json.contains("\"offset\":\"-07:00\""));
     }
 }
