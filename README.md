@@ -51,6 +51,17 @@ stderr):
     cargo run --release -- --json broken.jpg
     {"path":"broken.jpg","ok":false,"error":"no EXIF (APP1) segment found"}
 
+Pass a directory instead of a file to query every JPEG/TIFF/RAW file directly
+inside it (not recursive) and print one result line per file, sorted by
+name:
+
+    cargo run --release -- path/to/photos/
+    2023-07-04 14:22:09.500-07:00
+    photo2.jpg: EXIF data has no DateTimeOriginal or DateTime tag
+
+The exit code is non-zero if any file in the directory failed, same as for
+a single file.
+
 ## How it works
 
 1. Look at the first bytes of the file to find the TIFF-structured EXIF

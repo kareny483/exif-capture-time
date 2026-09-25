@@ -1,6 +1,7 @@
 use std::env;
 use std::fmt;
 use std::fs;
+use std::path::Path;
 use std::process;
 
 mod date;
@@ -56,6 +57,31 @@ fn run(path: &str) -> Result<date::CaptureTime, ExifError> {
     let exif = extract_exif_bytes(&data)?;
     let raw = tiff::find_capture_time_raw(exif)?;
     date::parse(&raw.date, raw.subsec.as_deref(), raw.offset.as_deref()).map_err(ExifError::Malformed)
+}
+
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "tif", "tiff", "cr2", "nef", "orf", "dng",
+];
+
+fn has_image_extension(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => IMAGE_EXTENSIONS.iter().any(|known| known.eq_ignore_ascii_case(ext)),
+        None => false,
+    }
+}
+
+/// Collects the paths of every file directly inside `dir` whose extension
+/// matches one of the formats this tool understands, in sorted order for
+/// stable output.
+fn collect_batch_paths(dir: &str) -> Result<Vec<String>, std::io::Error> {
+    let mut paths: Vec<String> = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| p.is_file() && has_image_extension(p))
+        .filter_map(|p| p.to_str().map(String::from))
+        .collect();
+    paths.sort();
+    Ok(paths)
 }
 
 /// Minimal escaping for the handful of characters that can actually show up
@@ -132,17 +158,41 @@ fn main() {
         } else if path.is_none() {
             path = Some(arg);
         } else {
-            eprintln!("usage: exiftime [--json] <path-to-jpeg-or-tiff>");
+            eprintln!("usage: exiftime [--json] <path-to-jpeg-or-tiff-or-directory>");
             process::exit(2);
         }
     }
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("usage: exiftime [--json] <path-to-jpeg-or-tiff>");
+            eprintln!("usage: exiftime [--json] <path-to-jpeg-or-tiff-or-directory>");
             process::exit(2);
         }
     };
+
+    if Path::new(&path).is_dir() {
+        let paths = match collect_batch_paths(&path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}: could not read directory: {}", path, e);
+                process::exit(1);
+            }
+        };
+        if paths.is_empty() {
+            eprintln!("{}: no JPEG or TIFF files found", path);
+            process::exit(1);
+        }
+        let mut any_failed = false;
+        for file_path in &paths {
+            let result = run(file_path);
+            any_failed |= result.is_err();
+            print_result(file_path, &result, json);
+        }
+        if any_failed {
+            process::exit(1);
+        }
+        return;
+    }
 
     let result = run(&path);
     let failed = result.is_err();
@@ -206,5 +256,46 @@ mod tests {
         let json = capture_time_to_json(&t);
         assert!(json.contains("\"subsec\":\"500\""));
         assert!(json.contains("\"offset\":\"-07:00\""));
+    }
+
+    #[test]
+    fn has_image_extension_matches_known_formats_case_insensitively() {
+        assert!(has_image_extension(Path::new("photo.jpg")));
+        assert!(has_image_extension(Path::new("photo.JPEG")));
+        assert!(has_image_extension(Path::new("photo.CR2")));
+        assert!(!has_image_extension(Path::new("photo.png")));
+        assert!(!has_image_extension(Path::new("noextension")));
+    }
+
+    /// Builds a scratch directory under the OS temp dir, unique to this
+    /// test run, so parallel test threads don't collide.
+    fn make_scratch_dir(name: &str) -> std::path::PathBuf {
+        let mut dir = env::temp_dir();
+        dir.push(format!("exiftime-test-{}-{}", name, process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn collect_batch_paths_filters_to_known_extensions_and_sorts() {
+        let dir = make_scratch_dir("collect-batch-paths");
+        fs::write(dir.join("b.jpg"), b"").unwrap();
+        fs::write(dir.join("a.tif"), b"").unwrap();
+        fs::write(dir.join("notes.txt"), b"").unwrap();
+        fs::create_dir_all(dir.join("subdir.jpg")).unwrap();
+
+        let found = collect_batch_paths(dir.to_str().unwrap()).unwrap();
+        let names: Vec<&str> = found
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["a.tif", "b.jpg"]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn collect_batch_paths_errors_on_missing_directory() {
+        assert!(collect_batch_paths("/no/such/exiftime/test/dir").is_err());
     }
 }
